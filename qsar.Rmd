@@ -1,0 +1,187 @@
+---
+title: "QSAR Analysis"
+output: html_document
+---
+
+## Objective
+
+1. To develop a function that relates descriptors to toxicity.
+2. To compare relative importance of QuickProp descriptors on toxicity prediction.
+
+## Outline
+
+In this experiment, regression models relating QuickProp descriptors to predict toxicity are built from a data set consists of 322 compounds that were experimentally assessed. 
+
+## Require packages
+
+```{r, warning=FALSE}
+start <- function(pkg){
+  npkg <- pkg[!(pkg %in% installed.packages()[,"Package"])]
+  if (length(npkg))
+    install.packages(npkg, dependencies = TRUE)
+  lapply(pkg, require, character.only=TRUE)
+}
+
+pkgs <- c("QSARdata",'caret','ggplot2')
+start(pkgs)
+```
+
+
+
+## Load data
+
+```{r}
+data(AquaticTox)
+head(AquaticTox_Outcome)
+descriptors<-AquaticTox_QuickProp
+data<-cbind(descriptors,AquaticTox_Outcome$Activity)
+str(data)
+colnames(data)[51]<- "Activity"
+colSums(is.na(data))/nrow(data)
+```
+
+The outcome is the negative log of activity labeled as "Activity". 
+
+Missing values in each column can be ignored.
+
+
+
+## Cleaning
+
+Variables with correlations larger than 0.29 are omitted.
+
+```{r}
+data<-na.omit(data)
+
+descs <- data[, !apply(data, 2, function(x) any(is.na(x)) )]
+
+descs <- descs[, !apply( descs, 2, function(x) length(unique(x)) == 1 )]
+
+r2 <- which(cor(descs[2:50])^2 > .29, arr.ind=TRUE)
+
+r2 <- r2[ r2[,1] > r2[,2] , ]
+d <- descs[, -unique(r2[,2])]
+```
+
+
+
+## Preprocessing
+
+Box-Cox transformation was performed on each column for better normality. 
+
+Dataset was split into training and test sets on a ratio of 8:2.
+
+```{r}
+Tran <- preProcess(d[,-1],method = "BoxCox")
+data <-predict(Tran,d[,-1])
+
+set.seed(909)
+ind<-sample(2,nrow(data),replace=TRUE,prob=c(0.8,0.2))
+training<-data[ind==1,-1]
+training$ID <- seq.int(nrow(training))
+test<-data[ind==2,-1]
+```
+
+
+
+## Linear least squares
+
+Starting from a simple regression model.
+
+```{r}
+lm.fit <- lm(Activity ~ ., data = training[,-13])
+summary(lm.fit)
+names(lm.fit)
+coef(lm.fit)
+confint(lm.fit)
+```
+
+Variables with high correlations are dropped in data cleaning section. So only 12 descriptors are used, among which the largest weight is -5.24, indicating an estimated 5.24 degrees decrease in activity for every unit increase of that variable holding the remaining variables constant.
+
+Residual plots:
+
+```{r}
+par(mfrow = c(2,2))
+plot(lm.fit)
+```
+
+```{r}
+plot(predict(lm.fit), residuals(lm.fit))
+
+plot(predict(lm.fit), rstudent(lm.fit))
+```
+
+No systematic patterns or large outlying observations is detected from above residual plots.
+
+Plot residuals versus molecules to zoom in the performance of the model:
+
+```{r}
+e <- resid(lm.fit)
+n <- length(e)
+x <- 1:n
+
+plot(x, e,
+     xlab = "Molecule index", 
+     ylab = "Residuals", 
+     bg = "lightblue", 
+     col = "black", cex = 2, pch = 21,frame = FALSE)
+abline(h = 0, lwd = 2)
+for (i in 1 : n) 
+  lines(c(x[i], x[i]), c(e[i], 0), col = "blue" , lwd = 2)
+```
+
+Examining leverage values:
+
+```{r}
+plot(hatvalues(lm.fit))
+which.max(hatvalues(lm.fit))
+```
+
+Molecules with indexes 212, 321, 302 have much higher leverage values and produce larger residuals. We further check their dfbetas values:
+
+```{r}
+dfb <- data.frame(dfbetas(lm.fit))
+summary(dfbetas(lm.fit)[-c(136,170),1])
+```
+
+With large leverage values and dfbetas, these two molecules are exerted.
+
+Final model:
+
+```{r}
+newlm <- lm(Activity~., data = training[-c(128, 179),])
+```
+
+Visualising the performance of the final model:
+
+```{r}
+p1 <- data.frame(predict(newlm, test, interval = "confidence"))
+p2 <- data.frame(predict(newlm, test, interval = "prediction"))
+p1$interval = "confidence"
+p2$interval = "prediction"
+p1$x = 1:nrow(test)
+p1$Activity <- test$Activity
+p2$x = 1:nrow(test)
+p2$Activity <- test$Activity
+dat = rbind(p1, p2)
+names(dat)[1] = "yhat"
+
+ggplot(dat, aes(x, yhat)) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr, fill = interval), alpha = 0.2) +
+  geom_line() +
+  geom_point(aes(x, Activity), size = 4)
+```
+
+
+
+## Partial Linear Squares
+```{r}
+pls.fit <- plsr(Activity ~., data = training[,-13], scale = TRUE, validation = "CV")
+summary(pls.fit) # The lowest cross-validation error occurs when M=5
+validationplot(pls.fit, val.type = "MSEP")
+pls.pred <- predict(pls.fit, test, ncomp = 5)
+mean((pls.pred-test$Activity)^2)
+
+pls.all <- plsr(Activity ~., data = data, scale = TRUE, ncomp = 5)
+summary(pls.all)
+```
